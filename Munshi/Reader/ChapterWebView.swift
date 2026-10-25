@@ -30,6 +30,7 @@ struct ChapterWebView {
         webView.setValue(false, forKey: "drawsBackground")
         #endif
         coordinator.webView = webView
+        model.page = coordinator
         return webView
     }
 
@@ -49,6 +50,9 @@ struct ChapterWebView {
         private var appearance: ReaderAppearance?
         private var loadedToken: UUID?
         private var pendingRequest: WebReaderModel.LoadRequest?
+        private var pendingNavigation: WKNavigation?
+        private var loadWaiters: [CheckedContinuation<Void, Never>] = []
+        private var isTornDown = false
 
         init(model: WebReaderModel, openExternal: @escaping (URL) -> Void) {
             self.model = model
@@ -87,13 +91,53 @@ struct ChapterWebView {
             guard request.token != loadedToken, let webView else { return }
             loadedToken = request.token
             pendingRequest = request
-            webView.loadFileURL(model.fileURL(forChapter: request.chapter), allowingReadAccessTo: model.contentURL)
+            pendingNavigation = webView.loadFileURL(model.fileURL(forChapter: request.chapter), allowingReadAccessTo: model.contentURL)
         }
 
         /// The content controller retains its message handlers, so break the cycle when the view goes away.
         func tearDown(_ webView: WKWebView) {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: Self.messageName)
             webView.navigationDelegate = nil
+            isTornDown = true
+            resumeLoadWaiters()
+        }
+
+        // MARK: Reading aloud
+
+        /// True once the chapter the model asked for has finished loading.
+        private var isLoaded: Bool {
+            loadedToken == model.request.token && pendingRequest == nil
+        }
+
+        private func resumeLoadWaiters() {
+            let waiters = loadWaiters
+            loadWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+
+        /// The readable blocks of the current chapter, waiting for it to load first if needed.
+        func speechSection(fromStart: Bool) async -> SpeechSection? {
+            while !isLoaded && !isTornDown {
+                await withCheckedContinuation { loadWaiters.append($0) }
+            }
+            guard !isTornDown, let webView else { return nil }
+            let json: String? = await withCheckedContinuation { continuation in
+                webView.evaluateJavaScript(Self.speechScript(fromStart: fromStart)) { result, _ in
+                    continuation.resume(returning: result as? String)
+                }
+            }
+            struct Result: Decodable {
+                var texts: [String]
+                var start: Int
+            }
+            guard let data = json?.data(using: .utf8),
+                  let result = try? JSONDecoder().decode(Result.self, from: data)
+            else { return nil }
+            return SpeechSection(blocks: result.texts, startIndex: result.start)
+        }
+
+        func highlightSpeechBlock(_ index: Int?) {
+            webView?.evaluateJavaScript("window.munshiHighlight && window.munshiHighlight(\(index ?? -1));", completionHandler: nil)
         }
 
         // MARK: WKNavigationDelegate
@@ -116,6 +160,26 @@ struct ChapterWebView {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 webView.evaluateJavaScript(script, completionHandler: nil)
             }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(100))
+                self.resumeLoadWaiters()
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            navigationFailed(navigation)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            navigationFailed(navigation)
+        }
+
+        /// A chapter that fails to load shouldn't leave read-aloud waiting for it.
+        private func navigationFailed(_ navigation: WKNavigation?) {
+            guard let navigation, navigation === pendingNavigation else { return }
+            pendingRequest = nil
+            pendingNavigation = nil
+            resumeLoadWaiters()
         }
 
         func webView(
@@ -163,6 +227,52 @@ struct ChapterWebView {
               }
               style.textContent = \(encoded);
             })();
+            """
+        }
+
+        /// Collects the chapter's readable blocks (paragraphs, headings, list items), tags each one so it
+        /// can be highlighted, and returns their text as JSON along with the first block on screen.
+        private static func speechScript(fromStart: Bool) -> String {
+            """
+            (function(fromStart) {
+              var selector = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,dt,dd,pre,figcaption,caption,td,th,div';
+              var tagged = document.querySelectorAll('[data-munshi-speech]');
+              for (var i = 0; i < tagged.length; i++) { tagged[i].removeAttribute('data-munshi-speech'); }
+              var texts = [];
+              var start = -1;
+              var nodes = document.body ? document.body.querySelectorAll(selector) : [];
+              for (var j = 0; j < nodes.length; j++) {
+                var el = nodes[j];
+                if (el.querySelector(selector)) { continue; }
+                var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+                if (!/[0-9A-Za-z\\u00C0-\\uFFFF]/.test(text)) { continue; }
+                el.setAttribute('data-munshi-speech', String(texts.length));
+                if (start < 0 && !fromStart && el.getBoundingClientRect().bottom > 4) { start = texts.length; }
+                texts.push(text);
+              }
+              if (texts.length === 0 && document.body) {
+                start = 0;
+                texts = (document.body.innerText || '').split(/\\n\\s*\\n/)
+                  .map(function(t) { return t.replace(/\\s+/g, ' ').trim(); })
+                  .filter(function(t) { return t.length > 0; });
+              }
+              window.munshiHighlight = function(index) {
+                var old = document.querySelectorAll('.munshi-speaking');
+                for (var k = 0; k < old.length; k++) { old[k].classList.remove('munshi-speaking'); }
+                if (index < 0) { return; }
+                var target = document.querySelector('[data-munshi-speech="' + index + '"]');
+                if (!target) { return; }
+                target.classList.add('munshi-speaking');
+                var rect = target.getBoundingClientRect();
+                if (rect.top < 0 || rect.bottom > window.innerHeight) {
+                  var tall = rect.height > window.innerHeight * 0.7;
+                  target.scrollIntoView({ behavior: 'smooth', block: tall ? 'start' : 'center' });
+                }
+              };
+              // Scrolled past every block: start with the last one rather than jumping back to the top.
+              if (start < 0) { start = fromStart ? 0 : texts.length - 1; }
+              return JSON.stringify({ texts: texts, start: Math.max(0, start) });
+            })(\(fromStart));
             """
         }
 

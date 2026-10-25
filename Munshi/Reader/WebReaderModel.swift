@@ -21,6 +21,11 @@ final class WebReaderModel {
     private(set) var chapter: Int
     private(set) var chapterFraction: Double
 
+    /// The web view showing the current chapter, used to read it aloud.
+    @ObservationIgnored weak var page: ChapterWebView.Coordinator?
+    /// The last chapter change made by reading aloud (so it isn't mistaken for the reader jumping).
+    @ObservationIgnored var speechNavigationToken: UUID?
+
     init(book: Book, publication: Publication) {
         self.book = book
         self.publication = publication
