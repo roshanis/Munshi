@@ -11,6 +11,8 @@ struct PDFReaderView: View {
     @State private var showingContents = false
     @State private var showingAppearance = false
     @State private var failed = false
+    @State private var readAloud = ReadAloudController()
+    @State private var speechSource: PDFSpeechSource?
 
     @AppStorage("reader.theme") private var theme: ReaderTheme = .system
     @Environment(\.colorScheme) private var colorScheme
@@ -28,6 +30,13 @@ struct PDFReaderView: View {
                         backgroundColor: resolvedTheme.background,
                         onPageChange: pageChanged
                     )
+                    if readAloud.isActive {
+                        ReadAloudBar(
+                            controller: readAloud,
+                            foreground: resolvedTheme.foreground,
+                            background: resolvedTheme.background
+                        )
+                    }
                     footer(pageCount: document.pageCount)
                 }
                 .background(resolvedTheme.background.ignoresSafeArea())
@@ -51,12 +60,25 @@ struct PDFReaderView: View {
             pageIndex = Int(book.location ?? "") ?? 0
             document = PDFDocument(url: book.originalFileURL)
             failed = document == nil
+            if let document {
+                let source = PDFSpeechSource(document: document)
+                source.visiblePage = pageIndex
+                let jump = $jumpRequest
+                source.turnToPage = { jump.wrappedValue = $0 }
+                speechSource = source
+                readAloud.source = source
+                readAloud.nowPlayingTitle = book.title
+                readAloud.nowPlayingArtist = book.author
+            }
         }
+        .onDisappear { readAloud.stop() }
     }
 
     @ToolbarContentBuilder
     private func toolbar(_ document: PDFDocument) -> some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
+            ReadAloudButton(controller: readAloud)
+
             Button {
                 showingContents = true
             } label: {
@@ -93,6 +115,7 @@ struct PDFReaderView: View {
 
     private func pageChanged(_ index: Int, _ count: Int) {
         pageIndex = index
+        speechSource?.visiblePage = index
         book.location = String(index)
         book.progress = count > 0 ? Double(index + 1) / Double(count) : 0
         book.lastOpenedAt = .now

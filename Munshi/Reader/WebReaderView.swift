@@ -8,6 +8,7 @@ struct WebReaderView: View {
     @State private var loadError: String?
     @State private var showingContents = false
     @State private var showingAppearance = false
+    @State private var readAloud = ReadAloudController()
 
     @AppStorage("reader.theme") private var theme: ReaderTheme = .system
     @AppStorage("reader.font") private var font: ReaderFont = .publisher
@@ -54,11 +55,32 @@ struct WebReaderView: View {
                 openExternal: { openURL($0) }
             )
             .id(model.contentURL)
+            if readAloud.isActive {
+                ReadAloudBar(
+                    controller: readAloud,
+                    foreground: appearance.theme.foreground,
+                    background: appearance.theme.background
+                )
+            }
             bottomBar(model)
         }
         .background(appearance.theme.background.ignoresSafeArea())
+        .onAppear {
+            readAloud.source = model
+            readAloud.nowPlayingTitle = book.title
+            readAloud.nowPlayingArtist = book.author
+        }
+        .onDisappear { readAloud.stop() }
+        .onChange(of: model.request.token) { _, token in
+            // The reader jumped (contents, chapter buttons, a link): keep reading from there.
+            if token != model.speechNavigationToken {
+                readAloud.sourceDidMove()
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                ReadAloudButton(controller: readAloud)
+
                 Button {
                     showingContents = true
                 } label: {

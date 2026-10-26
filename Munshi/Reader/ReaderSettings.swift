@@ -44,6 +44,15 @@ enum ReaderTheme: String, CaseIterable, Identifiable {
         }
     }
 
+    /// Background for the paragraph being read aloud.
+    var speakingHighlight: String {
+        switch self {
+        case .system, .light: "rgba(255, 204, 0, 0.28)"
+        case .sepia: "rgba(214, 160, 60, 0.30)"
+        case .dark: "rgba(255, 214, 10, 0.20)"
+        }
+    }
+
     var background: Color { Color(hex: backgroundHex) }
     var foreground: Color { Color(hex: textHex) }
     var isDark: Bool { self == .dark }
@@ -102,6 +111,12 @@ struct ReaderAppearance: Equatable {
             a, a * { color: \(theme.linkHex) !important; }
             img, svg, video, image { max-width: 100% !important; height: auto !important; }
             pre { white-space: pre-wrap; }
+            .munshi-speaking {
+              background-color: \(theme.speakingHighlight) !important;
+              border-radius: 0.25em;
+              box-shadow: 0 0 0 0.25em \(theme.speakingHighlight);
+              transition: background-color 0.2s;
+            }
             """,
         ]
         if let family = font.cssFamily {
